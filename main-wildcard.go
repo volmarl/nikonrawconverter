@@ -34,12 +34,14 @@ func ConvertRAWToJPEG(inputPath, outputPath string, quiet bool) error {
 		return fmt.Errorf("failed to get absolute path: %v", err)
 	}
 
-	// dcraw creates output file as: {input_without_extension}.tiff
-	// in the SAME DIRECTORY as the input file
-	inputDir := filepath.Dir(absInputPath)
+	// Use /tmp/ for temporary TIFF to avoid filling up source device (e.g., SD card)
 	inputBase := filepath.Base(absInputPath)
 	inputNoExt := strings.TrimSuffix(inputBase, filepath.Ext(inputBase))
-	dcrawOutput := filepath.Join(inputDir, inputNoExt+".tiff")
+	
+	// Create unique temp filename with timestamp to avoid conflicts
+	timestamp := time.Now().UnixNano()
+	tempTiffName := fmt.Sprintf("%s_%d.tiff", inputNoExt, timestamp)
+	dcrawOutput := filepath.Join("/tmp", tempTiffName)
 
 	// Remove any existing .tiff file
 	os.Remove(dcrawOutput)
@@ -47,17 +49,26 @@ func ConvertRAWToJPEG(inputPath, outputPath string, quiet bool) error {
 	if !quiet {
 		fmt.Println("Decoding RAW file with dcraw...")
 		fmt.Printf("  Input: %s\n", absInputPath)
-		fmt.Printf("  Expected dcraw output: %s\n", dcrawOutput)
+		fmt.Printf("  Temp TIFF: %s\n", dcrawOutput)
 	}
 	
 	// Run dcraw with TIFF output
 	// -T: output as TIFF
 	// -w: use camera white balance
 	// -q 3: high quality interpolation (AHD)
-	cmd := exec.Command(dcrawPath, "-T", "-w", "-q", "3", absInputPath)
+	// -c: write to stdout, then we redirect to /tmp/
+	cmd := exec.Command(dcrawPath, "-T", "-w", "-q", "3", "-c", absInputPath)
+	
+	// Create output file in /tmp/
+	outFile, err := os.Create(dcrawOutput)
+	if err != nil {
+		return fmt.Errorf("failed to create temp file: %v", err)
+	}
+	defer outFile.Close()
+	
+	cmd.Stdout = outFile
 	
 	if !quiet {
-		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 	}
 	
