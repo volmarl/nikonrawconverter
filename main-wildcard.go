@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -165,11 +166,18 @@ func findNEFFiles(pattern string) ([]string, error) {
 	return []string{pattern}, nil
 }
 
-// convertBatch processes multiple files
-func convertBatch(files []string, outputDir string) {
+// JobResult holds the result of a conversion job
+type JobResult struct {
+	filename string
+	output   string
+	err      error
+	size     int64
+	index    int
+}
+
+// convertBatch processes multiple files with parallel processing
+func convertBatch(files []string, outputDir string, workers int) {
 	total := len(files)
-	success := 0
-	failed := 0
 	startTime := time.Now()
 
 	fmt.Println("==========================================")
@@ -177,6 +185,7 @@ func convertBatch(files []string, outputDir string) {
 	fmt.Println("==========================================")
 	fmt.Printf("Files to process: %d\n", total)
 	fmt.Printf("Output directory: %s\n", outputDir)
+	fmt.Printf("Parallel workers: %d\n", workers)
 	fmt.Println("==========================================")
 	fmt.Println()
 
@@ -185,30 +194,76 @@ func convertBatch(files []string, outputDir string) {
 		os.MkdirAll(outputDir, 0755)
 	}
 
+	// Create channels for work distribution
+	jobs := make(chan struct {
+		file  string
+		index int
+	}, total)
+	results := make(chan JobResult, total)
+
+	// Start worker goroutines
+	for w := 0; w < workers; w++ {
+		go func() {
+			for job := range jobs {
+				filename := filepath.Base(job.file)
+				base := strings.TrimSuffix(filename, filepath.Ext(filename))
+				
+				var output string
+				if outputDir != "" {
+					output = filepath.Join(outputDir, base+".jpg")
+				} else {
+					output = base + ".jpg"
+				}
+
+				// Convert the file
+				err := ConvertRAWToJPEG(job.file, output, true)
+				
+				result := JobResult{
+					filename: filename,
+					output:   output,
+					err:      err,
+					index:    job.index,
+				}
+				
+				if err == nil {
+					if size, sizeErr := GetFileSize(output); sizeErr == nil {
+						result.size = size
+					}
+				}
+				
+				results <- result
+			}
+		}()
+	}
+
+	// Send jobs to workers
 	for i, file := range files {
-		filename := filepath.Base(file)
-		base := strings.TrimSuffix(filename, filepath.Ext(filename))
+		jobs <- struct {
+			file  string
+			index int
+		}{file, i}
+	}
+	close(jobs)
+
+	// Collect and display results
+	success := 0
+	failed := 0
+	processed := 0
+
+	for processed < total {
+		result := <-results
+		processed++
 		
-		var output string
-		if outputDir != "" {
-			output = filepath.Join(outputDir, base+".jpg")
-		} else {
-			output = base + ".jpg"
-		}
+		percentage := processed * 100 / total
+		fmt.Printf("[%d/%d - %d%%] %s", processed, total, percentage, result.filename)
 
-		// Progress
-		percentage := (i + 1) * 100 / total
-		fmt.Printf("[%d/%d - %d%%] Converting: %s", i+1, total, percentage, filename)
-
-		// Convert
-		err := ConvertRAWToJPEG(file, output, true)
-		if err != nil {
+		if result.err != nil {
 			failed++
-			fmt.Printf(" ✗ Failed: %v\n", err)
+			fmt.Printf(" ✗ Failed: %v\n", result.err)
 		} else {
 			success++
-			if size, err := GetFileSize(output); err == nil {
-				fmt.Printf(" ✓ (%.1f MB)\n", float64(size)/(1024*1024))
+			if result.size > 0 {
+				fmt.Printf(" ✓ (%.1f MB)\n", float64(result.size)/(1024*1024))
 			} else {
 				fmt.Println(" ✓")
 			}
@@ -226,10 +281,16 @@ func convertBatch(files []string, outputDir string) {
 		fmt.Printf("✗ Failed:     %d\n", failed)
 	}
 	fmt.Printf("Total:        %d\n", total)
+	fmt.Printf("Workers:      %d\n", workers)
 	fmt.Printf("Time elapsed: %s\n", formatDuration(elapsed))
 	if success > 0 {
 		avgTime := elapsed / time.Duration(success)
 		fmt.Printf("Average:      %s per file\n", formatDuration(avgTime))
+		
+		// Show speedup compared to sequential
+		seqTime := avgTime * time.Duration(success)
+		speedup := float64(seqTime) / float64(elapsed)
+		fmt.Printf("Speedup:      %.1fx faster than sequential\n", speedup)
 	}
 	fmt.Println("==========================================")
 }
@@ -246,21 +307,32 @@ func formatDuration(d time.Duration) string {
 
 func printUsage() {
 	fmt.Println("Nikon RAW to JPEG Converter")
-	fmt.Printf("Platform: %s/%s\n\n", runtime.GOOS, runtime.GOARCH)
+	fmt.Printf("Platform: %s/%s\n", runtime.GOOS, runtime.GOARCH)
+	fmt.Printf("CPU Cores: %d\n\n", runtime.NumCPU())
 	fmt.Println("Usage:")
 	fmt.Println("  Single file:  nikonraw <input.nef> <output.jpg>")
-	fmt.Println("  Wildcard:     nikonraw <pattern> <output_directory>")
+	fmt.Println("  Wildcard:     nikonraw [-j N] <pattern> <output_directory>")
+	fmt.Println()
+	fmt.Println("Options:")
+	fmt.Println("  -j N          Number of parallel workers (default: CPU cores)")
+	fmt.Println("  -h, --help    Show this help message")
 	fmt.Println()
 	fmt.Println("Examples:")
 	fmt.Println("  nikonraw DSC_0031.NEF output.jpg           # Convert single file")
-	fmt.Println("  nikonraw *.NEF converted/                  # Convert all NEF files")
-	fmt.Println("  nikonraw DSC_*.NEF processed/              # Convert matching files")
+	fmt.Println("  nikonraw \"*.NEF\" converted/                # Convert all (auto parallel)")
+	fmt.Println("  nikonraw -j 4 \"*.NEF\" converted/          # Use 4 workers")
+	fmt.Println("  nikonraw -j 1 \"*.NEF\" converted/          # Sequential (no parallel)")
+	fmt.Println("  nikonraw \"DSC_*.NEF\" processed/            # Convert matching files")
 	fmt.Println("  nikonraw \"photos/*.NEF\" jpg/               # Convert from subdirectory")
+	fmt.Println()
+	fmt.Println("Environment:")
+	fmt.Println("  NIKONRAW_WORKERS=N   Set default number of workers")
 	fmt.Println()
 	fmt.Println("Notes:")
 	fmt.Println("  - Output directory is created automatically if it doesn't exist")
 	fmt.Println("  - For batch conversion, output filenames match input basenames")
 	fmt.Println("  - Wildcards: * (any chars), ? (single char)")
+	fmt.Println("  - Parallel processing speeds up batch conversions significantly")
 }
 
 func main() {
@@ -275,13 +347,36 @@ func main() {
 		os.Exit(0)
 	}
 
-	if len(os.Args) != 3 {
+	// Parse arguments
+	workers := runtime.NumCPU() // Default to number of CPU cores
+	argOffset := 1
+
+	// Check for -j flag
+	if len(os.Args) >= 4 && os.Args[1] == "-j" {
+		if n, err := strconv.Atoi(os.Args[2]); err == nil && n > 0 {
+			workers = n
+			argOffset = 3
+		} else {
+			fmt.Fprintf(os.Stderr, "Error: Invalid worker count: %s\n", os.Args[2])
+			os.Exit(1)
+		}
+	}
+
+	// Check for environment variable
+	if envWorkers := os.Getenv("NIKONRAW_WORKERS"); envWorkers != "" && argOffset == 1 {
+		if n, err := strconv.Atoi(envWorkers); err == nil && n > 0 {
+			workers = n
+		}
+	}
+
+	// Need at least 2 more arguments after flags
+	if len(os.Args) < argOffset+2 {
 		printUsage()
 		os.Exit(1)
 	}
 
-	inputPattern := os.Args[1]
-	outputPath := os.Args[2]
+	inputPattern := os.Args[argOffset]
+	outputPath := os.Args[argOffset+1]
 
 	// Find matching files
 	files, err := findNEFFiles(inputPattern)
@@ -300,7 +395,11 @@ func main() {
 
 	if isBatch {
 		// Batch mode: treat outputPath as directory
-		convertBatch(files, outputPath)
+		// Limit workers to number of files if fewer files than workers
+		if workers > len(files) {
+			workers = len(files)
+		}
+		convertBatch(files, outputPath, workers)
 	} else {
 		// Single file mode
 		inputFile := files[0]
