@@ -75,13 +75,12 @@ Output: output.jpg
 
 Decoding RAW file with dcraw...
   Input: /full/path/to/DSC_0031.NEF
-  Expected dcraw output: /full/path/to/DSC_0031.tiff
+  Temp TIFF: /tmp/DSC_0031_1729512345678.tiff
 Loading Nikon D750 image from DSC_0031.NEF ...
 Scaling with darkness 600, saturation 16383, and
 multipliers 2.019531 1.000000 1.355469 1.000000
 AHD interpolation...
 Converting to sRGB colorspace...
-Writing data to DSC_0031.tiff ...
   TIFF created: 70.00 MB
 Loading TIFF image...
 Applying image enhancements...
@@ -161,15 +160,23 @@ The converter applies the following enhancements automatically:
 - `-T`: Output TIFF format (16-bit)
 - `-w`: Use camera white balance
 - `-q 3`: High-quality AHD interpolation
+- `-c`: Write to stdout (allows redirection to `/tmp/`)
 
 ### File Handling
 
-The converter intelligently handles dcraw's output behavior:
+The converter intelligently handles dcraw's output to avoid space issues:
 
-1. dcraw creates TIFF files in the **same directory** as the input NEF
-2. Temporary TIFF file is automatically cleaned up after conversion
-3. Output JPEG is saved to the specified location
-4. Preserves original NEF files (read-only operation)
+1. dcraw outputs to stdout using `-c` flag
+2. Temporary TIFF file is written to `/tmp/` directory (not source location)
+3. This prevents filling up SD cards or external media with large temp files
+4. Temporary TIFF file is automatically cleaned up after conversion
+5. Output JPEG is saved to the specified location
+6. Preserves original NEF files (read-only operation)
+
+**Why /tmp/?** 
+- Avoids "No space left on device" errors when reading from SD cards
+- System temp directory typically has more available space
+- Automatic cleanup even if process is interrupted
 
 ### Supported Cameras
 
@@ -247,8 +254,25 @@ sudo pacman -S dcraw
 
 **Solutions**:
 1. Check if input NEF file is valid
-2. Ensure sufficient disk space (TIFF files are ~70MB each)
-3. Verify read/write permissions in the directory
+2. Ensure sufficient space in `/tmp/` (TIFF files are ~70MB each)
+3. Verify read permissions on input file and write permissions on `/tmp/`
+
+### "No space left on device"
+
+**Problem**: Not enough space in `/tmp/` for temporary TIFF file.
+
+**Solutions**:
+```bash
+# Check /tmp/ space
+df -h /tmp
+
+# Clear /tmp/ if needed
+sudo rm -rf /tmp/DSC_*.tiff
+
+# Or set TMPDIR to a location with more space
+export TMPDIR=/path/to/large/drive/tmp
+mkdir -p $TMPDIR
+```
 
 ### "No NEF files found"
 
@@ -337,7 +361,13 @@ This project is provided as-is for personal and commercial use.
 
 ## Changelog
 
-### v1.1 (Latest)
+### v1.2 (Latest)
+- 🔥 **CRITICAL FIX**: Use `/tmp/` for temporary TIFF files instead of source directory
+- ✅ Prevents "No space left on device" errors when reading from SD cards
+- ✅ Added timestamp to temp filenames to avoid conflicts
+- ✅ Uses dcraw's `-c` flag to write to stdout
+
+### v1.1
 - ✨ Built-in wildcard support (`*.NEF`) for batch conversion
 - ✨ Automatic batch mode detection
 - ✅ Quiet mode for batch operations
